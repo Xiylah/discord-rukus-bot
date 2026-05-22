@@ -41,11 +41,15 @@ SECRET_CODE_PATTERNS = [
 ]
 
 # -------------------------
-# FUZZY MATCH HELPERS
+# FUZZY MATCH HELPERS (FIXED)
 # -------------------------
 
-def fuzzy_match(message: str, patterns: list[str], threshold: int = 75) -> bool:
-    message = message.lower()
+def fuzzy_match(message: str, patterns: list[str], threshold: int = 85) -> bool:
+    message = message.lower().strip()
+
+    # Ignore very short messages completely (fixes "no", "ya", etc.)
+    if len(message) < 10:
+        return False
 
     for pattern in patterns:
         score = fuzz.partial_ratio(message, pattern)
@@ -55,12 +59,32 @@ def fuzzy_match(message: str, patterns: list[str], threshold: int = 75) -> bool:
     return False
 
 
+def contains_keyword(message: str, keywords: list[str]) -> bool:
+    message = message.lower()
+    return any(k in message for k in keywords)
+
+
+# -------------------------
+# STRONGER INTENT CHECKS
+# -------------------------
+
+EVENT_KEYWORDS = ["event", "events"]
+
+SECRET_CODE_KEYWORDS = ["secret code", "hidden code", "code"]
+
+
 def is_event_question(message: str) -> bool:
-    return fuzzy_match(message, EVENT_PATTERNS)
+    return (
+        contains_keyword(message, EVENT_KEYWORDS)
+        or fuzzy_match(message, EVENT_PATTERNS)
+    )
 
 
 def is_secret_code_question(message: str) -> bool:
-    return fuzzy_match(message, SECRET_CODE_PATTERNS)
+    return (
+        contains_keyword(message, SECRET_CODE_KEYWORDS)
+        or fuzzy_match(message, SECRET_CODE_PATTERNS)
+    )
 
 
 # -------------------------
