@@ -9,12 +9,17 @@ intents.message_content = True
 
 client = discord.Client(intents=intents)
 
-# Replace with your actual channel ID (recommended)
-CHANNEL_ID = 1458936961044709539  # ← CHANGE THIS
+# Channel to direct users to for events
+EVENT_CHANNEL_ID = 1458936961044709539
 
-REPLY = f"Please check <#{CHANNEL_ID}>, anything related to events or updates will be posted there."
+EVENT_REPLY = f"Please check <#{EVENT_CHANNEL_ID}>, anything related to events or updates will be posted there."
 
-# These are "intent examples" (not strict keywords)
+SECRET_CODE_REPLY = f"Currently there is no secret codes. Keep an eye on <#{EVENT_CHANNEL_ID}> if we do drop any codes in the future!"
+
+# -------------------------
+# PATTERNS
+# -------------------------
+
 EVENT_PATTERNS = [
     "is there going to be an event",
     "any event this weekend",
@@ -25,24 +30,59 @@ EVENT_PATTERNS = [
     "any upcoming events",
 ]
 
-def is_event_question(message: str) -> bool:
+SECRET_CODE_PATTERNS = [
+    "what's the secret code",
+    "secret hidden code",
+    "what is the code",
+    "do you know the code",
+    "code for the server",
+    "hidden code",
+    "event code",
+]
+
+# -------------------------
+# FUZZY MATCH HELPERS
+# -------------------------
+
+def fuzzy_match(message: str, patterns: list[str], threshold: int = 75) -> bool:
     message = message.lower()
 
-    for pattern in EVENT_PATTERNS:
+    for pattern in patterns:
         score = fuzz.partial_ratio(message, pattern)
-        if score >= 75:   # sensitivity (you can tweak this)
+        if score >= threshold:
             return True
 
     return False
 
+
+def is_event_question(message: str) -> bool:
+    return fuzzy_match(message, EVENT_PATTERNS)
+
+
+def is_secret_code_question(message: str) -> bool:
+    return fuzzy_match(message, SECRET_CODE_PATTERNS)
+
+
+# -------------------------
+# BOT LOGIC
+# -------------------------
 
 @client.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    if is_event_question(message.content):
-        await message.reply(REPLY)
+    content = message.content
+
+    # Event-related questions
+    if is_event_question(content):
+        await message.reply(EVENT_REPLY)
+        return
+
+    # Secret code questions
+    if is_secret_code_question(content):
+        await message.reply(SECRET_CODE_REPLY)
+        return
 
 
 client.run(TOKEN)
