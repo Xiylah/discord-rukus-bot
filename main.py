@@ -9,7 +9,10 @@ intents.message_content = True
 
 client = discord.Client(intents=intents)
 
-REPLY = "Please check #🔔┇map-announcements, anything related to events or updates will be posted there."
+# Replace with your actual channel ID (recommended)
+CHANNEL_ID = 1458936961044709539  # ← CHANGE THIS
+
+REPLY = f"Please check <#{CHANNEL_ID}>, anything related to events or updates will be posted there."
 
 # These are "intent examples" (not strict keywords)
 EVENT_PATTERNS = [
