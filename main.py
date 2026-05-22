@@ -9,46 +9,62 @@ intents.message_content = True
 
 client = discord.Client(intents=intents)
 
-# Channel to direct users to for events
+# -------------------------
+# CONFIG
+# -------------------------
+
 EVENT_CHANNEL_ID = 1458936961044709539
 
 EVENT_REPLY = f"Please check <#{EVENT_CHANNEL_ID}>, anything related to events or updates will be posted there."
 
-SECRET_CODE_REPLY = f"Currently there is no secret codes. Keep an eye on <#{EVENT_CHANNEL_ID}> if we do drop any codes in the future!"
+SECRET_CODE_REPLY = (
+    f"Currently there are no secret codes. Keep an eye on <#{EVENT_CHANNEL_ID}> "
+    "if we do drop any in the future!"
+)
 
 # -------------------------
-# PATTERNS
+# PATTERNS (ONLY REAL QUESTIONS)
 # -------------------------
 
 EVENT_PATTERNS = [
-    "is there going to be an event",
-    "any event this weekend",
-    "are there events",
     "when is the next event",
-    "events coming up",
-    "event this weekend",
     "any upcoming events",
+    "what events are",
+    "is there an event",
+    "event this weekend",
 ]
 
 SECRET_CODE_PATTERNS = [
+    "what is the secret code",
     "what's the secret code",
-    "secret hidden code",
+    "is there a secret code",
+    "do you have a code",
     "what is the code",
-    "do you know the code",
-    "code for the server",
-    "hidden code",
-    "event code",
 ]
 
 # -------------------------
-# FUZZY MATCH HELPERS (FIXED)
+# HELPERS
 # -------------------------
 
-def fuzzy_match(message: str, patterns: list[str], threshold: int = 85) -> bool:
+def is_question(message: str) -> bool:
     message = message.lower().strip()
 
-    # Ignore very short messages completely (fixes "no", "ya", etc.)
-    if len(message) < 10:
+    return (
+        "?" in message
+        or message.startswith("what")
+        or message.startswith("when")
+        or message.startswith("is")
+        or message.startswith("are")
+        or message.startswith("do")
+        or message.startswith("can")
+    )
+
+
+def fuzzy_match(message: str, patterns: list[str], threshold: int = 90) -> bool:
+    message = message.lower().strip()
+
+    # Ignore very short / low-context messages
+    if len(message) < 12:
         return False
 
     for pattern in patterns:
@@ -59,32 +75,16 @@ def fuzzy_match(message: str, patterns: list[str], threshold: int = 85) -> bool:
     return False
 
 
-def contains_keyword(message: str, keywords: list[str]) -> bool:
-    message = message.lower()
-    return any(k in message for k in keywords)
-
-
 # -------------------------
-# STRONGER INTENT CHECKS
+# INTENT DETECTION
 # -------------------------
-
-EVENT_KEYWORDS = ["event", "events"]
-
-SECRET_CODE_KEYWORDS = ["secret code", "hidden code", "code"]
-
 
 def is_event_question(message: str) -> bool:
-    return (
-        contains_keyword(message, EVENT_KEYWORDS)
-        or fuzzy_match(message, EVENT_PATTERNS)
-    )
+    return is_question(message) and fuzzy_match(message, EVENT_PATTERNS)
 
 
 def is_secret_code_question(message: str) -> bool:
-    return (
-        contains_keyword(message, SECRET_CODE_KEYWORDS)
-        or fuzzy_match(message, SECRET_CODE_PATTERNS)
-    )
+    return is_question(message) and fuzzy_match(message, SECRET_CODE_PATTERNS)
 
 
 # -------------------------
@@ -98,7 +98,7 @@ async def on_message(message):
 
     content = message.content
 
-    # Event-related questions
+    # Event questions
     if is_event_question(content):
         await message.reply(EVENT_REPLY)
         return
