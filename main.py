@@ -1,8 +1,10 @@
 import discord
 import os
-from rapidfuzz import fuzz
+from sentence_transformers import SentenceTransformer, util
+import torch
 
 TOKEN = os.getenv("TOKEN")
+
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
@@ -12,91 +14,64 @@ client = discord.Client(intents=intents)
 # -------------------------
 EVENT_CHANNEL_ID = 1458936961044709539
 EVENT_REPLY = f"Please check <#{EVENT_CHANNEL_ID}>, anything related to events or updates will be posted there."
+SECRET_CODE_REPLY = f"Currently there are no secret codes. Keep an eye on <#{EVENT_CHANNEL_ID}> if we do drop any in the future!"
 
-SECRET_CODE_REPLY = (
-    f"Currently there are no secret codes. Keep an eye on <#{EVENT_CHANNEL_ID}> "
-    "if we do drop any in the future!"
-)
+# Load model once (fast & efficient)
+model = SentenceTransformer('all-MiniLM-L6-v2')  # Small and very good
 
 # -------------------------
-# PATTERNS (ONLY REAL QUESTIONS)
+# BETTER EXAMPLES (Semantic)
 # -------------------------
-EVENT_PATTERNS = [
+EVENT_EXAMPLES = [
     "when is the next event",
     "any upcoming events",
-    "what events are",
-    "is there an event",
-    "event this weekend",
-    # Admin Abuse patterns
-    "admin abuse",
-    "is there admin abuse",
-    "admin abuse this weekend",
-    "any admin abuse",
-    "when is admin abuse",
-    "admin abuse event",
+    "what events are coming up",
+    "is there an event this weekend",
+    "when's the next update",
+    "any events soon",
+    "event schedule",
+    "are we having an event",
 ]
 
-SECRET_CODE_PATTERNS = [
+SECRET_CODE_EXAMPLES = [
     "what is the secret code",
-    "what's the secret code",
+    "what's the secret code right now",
     "is there a secret code",
-    "do you have a code",
-    "what is the code",
+    "do you have any codes",
+    "give me the code",
+    "current secret code",
 ]
 
-# -------------------------
-# HELPERS
-# -------------------------
-def is_question(message: str) -> bool:
-    message = message.lower().strip()
-    return (
-        "?" in message
-        or message.startswith("what")
-        or message.startswith("when")
-        or message.startswith("is")
-        or message.startswith("are")
-        or message.startswith("do")
-        or message.startswith("can")
-    )
-
-def fuzzy_match(message: str, patterns: list[str], threshold: int = 85) -> bool:
-    message = message.lower().strip()
-    if len(message) < 10:  # Slightly lowered for shorter phrases like "admin abuse"
-        return False
-    
-    for pattern in patterns:
-        score = fuzz.partial_ratio(message, pattern)
-        if score >= threshold:
-            return True
-    return False
+# Pre-compute embeddings
+event_embeddings = model.encode(EVENT_EXAMPLES, convert_to_tensor=True)
+secret_embeddings = model.encode(SECRET_CODE_EXAMPLES, convert_to_tensor=True)
 
 # -------------------------
 # INTENT DETECTION
 # -------------------------
-def is_event_question(message: str) -> bool:
-    return is_question(message) and fuzzy_match(message, EVENT_PATTERNS)
+def get_best_similarity(message: str, embeddings):
+    message_emb = model.encode(message, convert_to_tensor=True)
+    similarities = util.cos_sim(message_emb, embeddings)
+    return similarities.max().item()
 
-def is_secret_code_question(message: str) -> bool:
-    return is_question(message) and fuzzy_match(message, SECRET_CODE_PATTERNS)
-
-# -------------------------
-# BOT LOGIC
-# -------------------------
 @client.event
 async def on_message(message):
     if message.author.bot:
         return
+
+    content = message.content.lower().strip()
     
-    content = message.content
-    
-    # Event questions (now includes Admin Abuse)
-    if is_event_question(content):
+    if len(content) < 8:
+        return
+
+    # Get similarity scores
+    event_score = get_best_similarity(content, event_embeddings)
+    secret_score = get_best_similarity(content, secret_embeddings)
+
+    # You can tune these thresholds
+    if event_score > 0.65:
         await message.reply(EVENT_REPLY)
-        return
-    
-    # Secret code questions
-    if is_secret_code_question(content):
+    elif secret_score > 0.68:
         await message.reply(SECRET_CODE_REPLY)
-        return
 
 client.run(TOKEN)
