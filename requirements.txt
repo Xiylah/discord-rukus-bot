@@ -1,2 +1,3 @@
 discord.py
 rapidfuzz
+sentence_transformers
