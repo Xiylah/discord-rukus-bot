@@ -1,7 +1,6 @@
 import discord
 import os
 from sentence_transformers import SentenceTransformer, util
-import torch
 
 TOKEN = os.getenv("TOKEN")
 
@@ -13,14 +12,15 @@ client = discord.Client(intents=intents)
 # CONFIG
 # -------------------------
 EVENT_CHANNEL_ID = 1458936961044709539
+
 EVENT_REPLY = f"Please check <#{EVENT_CHANNEL_ID}>, anything related to events or updates will be posted there."
 SECRET_CODE_REPLY = f"Currently there are no secret codes. Keep an eye on <#{EVENT_CHANNEL_ID}> if we do drop any in the future!"
 
-# Load model once (fast & efficient)
-model = SentenceTransformer('all-MiniLM-L6-v2')  # Small and very good
+# Load model once
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 # -------------------------
-# BETTER EXAMPLES (Semantic)
+# SEMANTIC EXAMPLES
 # -------------------------
 EVENT_EXAMPLES = [
     "when is the next event",
@@ -31,6 +31,17 @@ EVENT_EXAMPLES = [
     "any events soon",
     "event schedule",
     "are we having an event",
+    # Admin Abuse related (now part of events)
+    "is there any admin abuse this weekend",
+    "any admin abuse",
+    "when is admin abuse",
+    "admin abuse this week",
+    "when is the next admin abuse",
+    "is admin abuse happening",
+    "admin abuse schedule",
+    "any admin abuse soon",
+    "admin abuse event",
+    "when does admin abuse start",
 ]
 
 SECRET_CODE_EXAMPLES = [
@@ -60,7 +71,7 @@ async def on_message(message):
         return
 
     content = message.content.lower().strip()
-    
+   
     if len(content) < 8:
         return
 
@@ -68,7 +79,7 @@ async def on_message(message):
     event_score = get_best_similarity(content, event_embeddings)
     secret_score = get_best_similarity(content, secret_embeddings)
 
-    # You can tune these thresholds
+    # Check intents
     if event_score > 0.65:
         await message.reply(EVENT_REPLY)
     elif secret_score > 0.68:
