@@ -70,8 +70,14 @@ async def on_message(message):
 
     # You can tune these thresholds
     if event_score > 0.65:
-        await message.reply(EVENT_REPLY)
+        try:
+            await message.reply(EVENT_REPLY)
+        except discord.errors.HTTPException as e:
+            print(f"Failed to reply to message {message.id}: {e}")
     elif secret_score > 0.68:
-        await message.reply(SECRET_CODE_REPLY)
+        try:
+            await message.reply(SECRET_CODE_REPLY)
+        except discord.errors.HTTPException as e:
+            print(f"Failed to reply to message {message.id}: {e}")
 
 client.run(TOKEN)
