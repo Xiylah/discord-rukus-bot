@@ -1,10 +1,10 @@
-# fly.toml app configuration file generated for discord-rukus-bot on 2026-05-24T20:37:32Z
+# fly.toml app configuration file generated for discord-rukus-bot on 2026-05-24T20:59:43Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
 app = 'discord-rukus-bot'
-primary_region = 'dfw'
+primary_region = 'ord'
 
 [build]
 
