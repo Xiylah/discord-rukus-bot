@@ -50,6 +50,17 @@ SECRET_CODE_EXAMPLES = [
     "current secret code",
     "any active codes",
     "is there a code right now",
+    # Pin code variations
+    "what is the pin code",
+    "what's the pin code",
+    "is there a pin code",
+    "do you have a pin",
+    "what is the pin",
+    "current pin code",
+    "any active pin",
+    "is there a pin right now",
+    "give me the pin",
+    "what pin do i use",
 ]
 
 # Negative examples — things that LOOK related but aren't questions
