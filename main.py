@@ -38,6 +38,7 @@ EVENT_EXAMPLES = [
     "when does admin abuse start",
     "is admin abuse happening",
     "what time is the next event",
+    "is there an event today",
     "any events planned",
 ]
 
