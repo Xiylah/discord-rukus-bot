@@ -46,8 +46,6 @@ SECRET_CODE_EXAMPLES = [
     "what is the secret code",
     "what's the secret code right now",
     "is there a secret code",
-    "do you have any codes",
-    "give me the code",
     "current secret code",
     "any active codes",
     "is there a code right now",
