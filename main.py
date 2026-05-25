@@ -1,6 +1,7 @@
 import discord
 import os
 import json
+import re
 from pathlib import Path
 from sentence_transformers import SentenceTransformer, util
 import torch
@@ -34,6 +35,12 @@ EVENT_EXAMPLES = [
     "what time is the next event",
     "is there an event today",
     "any events planned",
+    "is there a live event",
+    "is there a live event in the game",
+    "is there currently a live event",
+    "guys is there an event",
+    "does anyone know if there's an event",
+    "has anyone heard about an upcoming event",
 ]
 
 SECRET_CODE_EXAMPLES = [
@@ -53,6 +60,11 @@ SECRET_CODE_EXAMPLES = [
     "is there a pin right now",
     "give me the pin",
     "what pin do i use",
+    "does anyone know the code",
+    "has anyone figured out the code",
+    "can someone give me hints on the code",
+    "what is the code i need to use",
+    "is there a code to use",
 ]
 
 NEGATIVE_EXAMPLES = [
@@ -66,17 +78,61 @@ NEGATIVE_EXAMPLES = [
     "admin abuse is wild",
     "codes are hard to remember",
     "i used the code already",
+    "no live event at this time",
+    "they have mini events all the time",
+    "there are no events right now",
+    "the event already ended",
+    "we just had an event",
+    "events will be posted when ready",
+    "admin abuse will be announced",
+    "the code has been used",
+    "no secret codes currently",
 ]
 
-QUESTION_SIGNALS = [
-    "when", "what", "is there", "any", "do you", "does", "will", "are",
-    "how", "where", "?", "gonna", "going to", "happening", "schedule",
-    "date", "time", "soon", "next", "today", "tomorrow", "this week", "this weekend"
+# Filler phrases to strip before semantic scoring
+FILLER_PATTERNS = [
+    r"^(hey\s+)?(guys|everyone|all|y'all|folks)\b[,\s]*",
+    r"^(hi|hey|hello|yo|sup)\b[,\s]*",
+    r"\bhope\s+(everyone('s|s|is)\s+\w+\s*)+",
+    r"\bjust\s+wanted\s+to\s+(see|ask|check|know)\s+(if\s+)?",
+    r"\bthank\s+you(\s+in\s+advance)?\b",
+    r"\bcan\s+(maybe|possibly|you)\s+",
+    r"\band\s+can\s+(maybe|possibly)?\s*",
 ]
 
-# How close a near-miss must be to the threshold to be auto-learned
+# Declarative sentence patterns — these are statements, not questions
+DECLARATIVE_PATTERNS = [
+    r"^(there\s+)(are\s+no|is\s+no|aren't\s+any|isn't\s+any)\b",
+    r"^no\s+\w+\s+at\s+this\s+time",
+    r"^they\s+(have|had|will\s+have)\b",
+    r"^(it|this)\s+(was|is|will\s+be)\b",
+    r"^(the|an?)\s+\w+\s+(was|is|has\s+been|will\s+be)\b",
+    r"^(i\s+)(went|used|did|was|had|got)\b",
+    r"^(we\s+)(just|already|recently)\b",
+    r"^(admin\s+abuse|events?)\s+(will\s+be|are\s+going\s+to\s+be)\s+(announced|posted)\b",
+    r"^lol\b",
+]
+
+# Strong question indicators (auxiliary inversion = almost certainly a question)
+AUX_INVERSION = re.compile(
+    r"^(is|are|was|were|do|does|did|can|could|will|would|should|has|have|had)\s",
+    re.IGNORECASE
+)
+
+WH_QUESTION = re.compile(
+    r"^(what|when|where|who|why|how|which|whose)\b",
+    re.IGNORECASE
+)
+
+QUESTION_MARK = re.compile(r"\?")
+
+# Softer signals used as a last resort
+SOFT_SIGNALS = [
+    "any upcoming", "any active", "any events", "any codes", "any pins",
+    "give me the", "tell me the", "need the code", "need to know",
+]
+
 AUTO_LEARN_WINDOW = 0.12
-# The reply thresholds
 EVENT_THRESHOLD = 0.72
 SECRET_THRESHOLD = 0.74
 NEGATIVE_PENALTY = 0.02
@@ -134,10 +190,52 @@ def add_live_embedding(text: str, label: str):
         all_secret_examples.append(text)
 
 
-# --- SCORING ---
+# --- CLASSIFICATION ---
 
-def has_question_intent(text: str) -> bool:
-    return any(signal in text.lower() for signal in QUESTION_SIGNALS)
+def strip_filler(text: str) -> str:
+    """Remove common filler phrases to expose the core intent."""
+    cleaned = text.strip()
+    for pattern in FILLER_PATTERNS:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+    # Collapse extra whitespace
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned if len(cleaned) >= 6 else text  # Safety: don't over-strip
+
+def is_declarative(text: str) -> bool:
+    """Return True if the text is almost certainly a statement, not a question."""
+    t = text.strip().lower()
+    return any(re.match(p, t) for p in DECLARATIVE_PATTERNS)
+
+def is_question(text: str) -> bool:
+    """
+    Determine if a message is a genuine question using grammatical cues,
+    not just keyword presence.
+    """
+    t = text.strip()
+    t_lower = t.lower()
+
+    # Hard no: declarative structure overrides everything
+    if is_declarative(t_lower):
+        return False
+
+    # Strong yes: ends with ? (explicit question mark)
+    if QUESTION_MARK.search(t):
+        return True
+
+    # Strong yes: starts with auxiliary inversion ("Is there", "Do you", "Can anyone")
+    if AUX_INVERSION.match(t):
+        return True
+
+    # Strong yes: starts with a WH-word ("When is", "What is", "How do")
+    if WH_QUESTION.match(t):
+        return True
+
+    # Medium yes: soft signals after filler stripping
+    core = strip_filler(t_lower)
+    if any(sig in core for sig in SOFT_SIGNALS):
+        return True
+
+    return False
 
 def is_admin_abuse_query(text: str) -> bool:
     text_lower = text.lower()
@@ -149,11 +247,15 @@ def is_admin_abuse_query(text: str) -> bool:
     ])
 
 def get_scores(message: str):
-    msg_emb = model.encode(message, convert_to_tensor=True)
+    """Score the semantic core (filler-stripped) text against all example banks."""
+    core = strip_filler(message)
+    msg_emb = model.encode(core, convert_to_tensor=True)
+
     def top_mean(emb_bank, k=2):
         sims = util.cos_sim(msg_emb, emb_bank)[0]
         top_k = torch.topk(sims, min(k, len(sims))).values
         return top_k.mean().item()
+
     return top_mean(event_embeddings), top_mean(secret_embeddings), top_mean(negative_embeddings)
 
 
@@ -170,11 +272,13 @@ async def on_message(message):
 
     content_lower = content.lower()
 
+    # Fast path: explicit admin abuse scheduling query
     if is_admin_abuse_query(content_lower):
         await message.reply(EVENT_REPLY)
         return
 
-    if not has_question_intent(content_lower):
+    # Gate: must be a genuine question (grammatical check, not keyword check)
+    if not is_question(content):
         return
 
     event_score, secret_score, negative_score = get_scores(content_lower)
@@ -190,12 +294,9 @@ async def on_message(message):
         await message.reply(SECRET_CODE_REPLY)
 
     else:
-        # Auto-learn: if the message is close to a threshold and scores
-        # higher on that category than the negative bank, treat it as a
-        # genuine question and absorb it as a new example.
         negative_is_dominant = negative_score > max(event_score, secret_score)
         if negative_is_dominant:
-            return  # Looks like a statement, not a question — ignore
+            return
 
         near_event = EVENT_THRESHOLD - AUTO_LEARN_WINDOW < adj_event < EVENT_THRESHOLD
         near_secret = SECRET_THRESHOLD - AUTO_LEARN_WINDOW < adj_secret < SECRET_THRESHOLD
