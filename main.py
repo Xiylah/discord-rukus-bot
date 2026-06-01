@@ -12,6 +12,7 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 EVENT_CHANNEL_ID = 1458936961044709539
+FURNITURE_CHANNEL_ID = 1510456653085020290
 EVENT_REPLY = f"Please check <#{EVENT_CHANNEL_ID}>, anything related to events or updates will be posted there."
 SECRET_CODE_REPLY = f"Currently there are no secret codes. Keep an eye on <#{EVENT_CHANNEL_ID}> if we do drop any in the future!"
 
@@ -264,6 +265,14 @@ def get_scores(message: str):
 @client.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    # Silently delete text-only messages in the furniture channel
+    if message.channel.id == FURNITURE_CHANNEL_ID:
+        has_attachment = len(message.attachments) > 0
+        has_embed_image = any(e.image or e.thumbnail for e in message.embeds)
+        if not has_attachment and not has_embed_image:
+            await message.delete()
         return
 
     content = message.content.strip()
