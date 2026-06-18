@@ -1,10 +1,6 @@
 import discord
 import os
-import json
 import re
-from pathlib import Path
-from sentence_transformers import SentenceTransformer, util
-import torch
 
 TOKEN = os.getenv("TOKEN")
 intents = discord.Intents.default()
@@ -17,76 +13,10 @@ SUPPORT_CHANNEL_ID = 1478734423972384799
 EVENT_REPLY = f"Please check <#{EVENT_CHANNEL_ID}>, anything related to events or updates will be posted there."
 SUPPORT_REPLY = f"Please file a support ticket here: <#{SUPPORT_CHANNEL_ID}> and we can help you out!"
 
-LEARNED_EXAMPLES_FILE = Path("learned_examples.json")
 
-EVENT_EXAMPLES = [
-    "when is the next event",
-    "any upcoming events",
-    "what events are coming up",
-    "is there an event this weekend",
-    "when's the next update",
-    "event schedule",
-    "are we having an event soon",
-    "when is admin abuse",
-    "admin abuse this weekend",
-    "is there admin abuse this week",
-    "when is the next admin abuse",
-    "admin abuse schedule",
-    "when does admin abuse start",
-    "is admin abuse happening",
-    "what time is the next event",
-    "is there an event today",
-    "any events planned",
-    "is there a live event",
-    "is there a live event in the game",
-    "is there currently a live event",
-    "guys is there an event",
-    "does anyone know if there's an event",
-    "has anyone heard about an upcoming event",
-]
+# --- PATTERNS ---
 
-LOST_ITEMS_EXAMPLES = [
-    "i lost my items",
-    "i lost my inventory",
-    "my items are gone",
-    "my inventory disappeared",
-    "i lost everything in my inventory",
-    "all my items are missing",
-    "my stuff disappeared",
-    "i lost all my stuff",
-    "my items got wiped",
-    "my inventory got reset",
-    "i lost my gear",
-    "all my gear is gone",
-    "my items vanished",
-    "i can't find my items",
-    "where did my items go",
-    "my inventory is empty",
-    "i lost my weapons",
-    "my weapons disappeared",
-    "i lost my tools",
-    "everything i had is gone",
-]
-
-NEGATIVE_EXAMPLES = [
-    "that event was fun",
-    "i went to an event yesterday",
-    "admin abuse is so annoying",
-    "this event was terrible",
-    "lol admin abuse happened to me",
-    "the last event was great",
-    "i love events",
-    "admin abuse is wild",
-    "no live event at this time",
-    "they have mini events all the time",
-    "there are no events right now",
-    "the event already ended",
-    "we just had an event",
-    "events will be posted when ready",
-    "admin abuse will be announced",
-]
-
-# Filler phrases to strip before semantic scoring
+# Filler phrases to strip before matching
 FILLER_PATTERNS = [
     r"^(hey\s+)?(guys|everyone|all|y'all|folks)\b[,\s]*",
     r"^(hi|hey|hello|yo|sup)\b[,\s]*",
@@ -97,7 +27,7 @@ FILLER_PATTERNS = [
     r"\band\s+can\s+(maybe|possibly)?\s*",
 ]
 
-# Declarative sentence patterns — these are statements, not questions
+# Declarative patterns — statements, not questions, never trigger replies
 DECLARATIVE_PATTERNS = [
     r"^(there\s+)(are\s+no|is\s+no|aren't\s+any|isn't\s+any)\b",
     r"^no\s+\w+\s+at\s+this\s+time",
@@ -110,82 +40,46 @@ DECLARATIVE_PATTERNS = [
     r"^lol\b",
 ]
 
-# Strong question indicators (auxiliary inversion = almost certainly a question)
 AUX_INVERSION = re.compile(
     r"^(is|are|was|were|do|does|did|can|could|will|would|should|has|have|had)\s",
     re.IGNORECASE
 )
+WH_QUESTION = re.compile(r"^(what|when|where|who|why|how|which|whose)\b", re.IGNORECASE)
+QUESTION_MARK = re.compile(r"\?")
 
-WH_QUESTION = re.compile(
-    r"^(what|when|where|who|why|how|which|whose)\b",
+# Event keywords — message must contain at least one of these
+EVENT_KEYWORDS = re.compile(
+    r"\b(event|events|admin\s*abuse|adminabuse|update|updates|live\s+event|schedule)\b",
     re.IGNORECASE
 )
 
-QUESTION_MARK = re.compile(r"\?")
+# Event question signals — indicates the message is asking about timing/existence
+EVENT_QUESTION_SIGNALS = re.compile(
+    r"\b(when|next|upcoming|soon|today|tomorrow|this\s+week|this\s+weekend|"
+    r"any\s+events?|any\s+upcoming|happening|scheduled?|planned|going\s+on|"
+    r"is\s+there|are\s+there|is\s+it|will\s+there)\b",
+    re.IGNORECASE
+)
 
-# Softer signals used as a last resort
-SOFT_SIGNALS = [
-    "any upcoming", "any active", "any events",
-    "give me the", "tell me the", "need to know",
+# Lost items — any of these phrases trigger the support reply
+LOST_ITEMS_PATTERNS = re.compile(
+    r"\b(lost|missing|gone|disappeared|vanished|wiped|reset|empty|can'?t\s+find)\b.{0,30}"
+    r"\b(item|items|inventory|stuff|gear|weapons?|tools?|everything)\b"
+    r"|"
+    r"\b(item|items|inventory|stuff|gear|weapons?|tools?|everything)\b.{0,30}"
+    r"\b(lost|missing|gone|disappeared|vanished|wiped|reset|empty)\b",
+    re.IGNORECASE
+)
+
+SOFT_EVENT_SIGNALS = [
+    "any upcoming", "any events", "any active",
+    "need to know", "tell me when",
 ]
 
-AUTO_LEARN_WINDOW = 0.12
-EVENT_THRESHOLD = 0.72
-LOST_ITEMS_THRESHOLD = 0.74
-NEGATIVE_PENALTY = 0.02
 
-
-# --- PERSISTENCE ---
-
-def load_learned_examples():
-    if not LEARNED_EXAMPLES_FILE.exists():
-        return []
-    try:
-        data = json.loads(LEARNED_EXAMPLES_FILE.read_text())
-        return data.get("event", [])
-    except Exception as e:
-        print(f"[warn] Could not load learned_examples.json: {e}")
-        return []
-
-def save_learned_example(text: str):
-    data = {"event": []}
-    if LEARNED_EXAMPLES_FILE.exists():
-        try:
-            data = json.loads(LEARNED_EXAMPLES_FILE.read_text())
-        except Exception:
-            pass
-    if text not in data["event"]:
-        data["event"].append(text)
-        LEARNED_EXAMPLES_FILE.write_text(json.dumps(data, indent=2))
-        print(f"[learn] Saved event example: {text!r}")
-
-
-# --- MODEL + EMBEDDINGS ---
-
-print("Loading model...")
-model = SentenceTransformer("all-MiniLM-L6-v2")
-
-extra_event = load_learned_examples()
-all_event_examples = EVENT_EXAMPLES + extra_event
-
-event_embeddings = model.encode(all_event_examples, convert_to_tensor=True)
-negative_embeddings = model.encode(NEGATIVE_EXAMPLES, convert_to_tensor=True)
-lost_items_embeddings = model.encode(LOST_ITEMS_EXAMPLES, convert_to_tensor=True)
-
-print(f"Ready. {len(all_event_examples)} event examples.")
-
-
-def add_live_embedding(text: str):
-    global event_embeddings
-    new_emb = model.encode(text, convert_to_tensor=True).unsqueeze(0)
-    event_embeddings = torch.cat([event_embeddings, new_emb], dim=0)
-    all_event_examples.append(text)
-
-
-# --- CLASSIFICATION ---
+# --- HELPERS ---
 
 def strip_filler(text: str) -> str:
-    """Remove common filler phrases to expose the core intent."""
     cleaned = text.strip()
     for pattern in FILLER_PATTERNS:
         cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
@@ -193,7 +87,6 @@ def strip_filler(text: str) -> str:
     return cleaned if len(cleaned) >= 6 else text
 
 def is_declarative(text: str) -> bool:
-    """Return True if the text is almost certainly a statement, not a question."""
     t = text.strip().lower()
     return any(re.match(p, t) for p in DECLARATIVE_PATTERNS)
 
@@ -203,45 +96,37 @@ def is_question(text: str) -> bool:
 
     if is_declarative(t_lower):
         return False
-
     if QUESTION_MARK.search(t):
         return True
-
     if AUX_INVERSION.match(t):
         return True
-
     if WH_QUESTION.match(t):
         return True
 
     core = strip_filler(t_lower)
-    if any(sig in core for sig in SOFT_SIGNALS):
+    if any(sig in core for sig in SOFT_EVENT_SIGNALS):
         return True
 
     return False
 
-def is_admin_abuse_query(text: str) -> bool:
-    text_lower = text.lower()
-    if "admin abuse" not in text_lower and "adminabuse" not in text_lower.replace(" ", ""):
+def is_event_query(text: str) -> bool:
+    """True if the message is a question asking about an event or admin abuse."""
+    if not EVENT_KEYWORDS.search(text):
         return False
-    return any(w in text_lower for w in [
-        "when", "next", "this weekend", "this week", "soon", "today",
-        "tomorrow", "schedule", "date", "happening", "start", "event", "time", "?"
-    ])
+    if not is_question(text):
+        return False
+    return bool(EVENT_QUESTION_SIGNALS.search(text))
 
-def get_scores(message: str):
-    """Score the semantic core (filler-stripped) text against all example banks."""
-    core = strip_filler(message)
-    msg_emb = model.encode(core, convert_to_tensor=True)
-
-    def top_mean(emb_bank, k=2):
-        sims = util.cos_sim(msg_emb, emb_bank)[0]
-        top_k = torch.topk(sims, min(k, len(sims))).values
-        return top_k.mean().item()
-
-    return top_mean(event_embeddings), top_mean(negative_embeddings), top_mean(lost_items_embeddings)
+def is_lost_items_report(text: str) -> bool:
+    """True if the message describes losing items/inventory."""
+    return bool(LOST_ITEMS_PATTERNS.search(text))
 
 
 # --- BOT ---
+
+@client.event
+async def on_ready():
+    print(f"Logged in as {client.user}. Ready.")
 
 @client.event
 async def on_message(message):
@@ -262,33 +147,12 @@ async def on_message(message):
 
     content_lower = content.lower()
 
-    # Fast path: explicit admin abuse scheduling query
-    if is_admin_abuse_query(content_lower):
-        await message.reply(EVENT_REPLY)
-        return
-
-    # Gate: must be a genuine question
-    if not is_question(content):
-        return
-
-    event_score, negative_score, lost_items_score = get_scores(content_lower)
-
-    penalty = max(0, (negative_score - 0.55) * 2) * NEGATIVE_PENALTY
-    adj_event = event_score - penalty
-
-    if lost_items_score > LOST_ITEMS_THRESHOLD:
+    if is_lost_items_report(content_lower):
         await message.reply(SUPPORT_REPLY)
-    elif adj_event > EVENT_THRESHOLD:
-        await message.reply(EVENT_REPLY)
-    else:
-        negative_is_dominant = negative_score > event_score
-        if negative_is_dominant:
-            return
+        return
 
-        near_event = EVENT_THRESHOLD - AUTO_LEARN_WINDOW < adj_event < EVENT_THRESHOLD
-        if near_event:
-            add_live_embedding(content_lower)
-            save_learned_example(content_lower)
-            await message.reply(EVENT_REPLY)
+    if is_event_query(content_lower):
+        await message.reply(EVENT_REPLY)
+        return
 
 client.run(TOKEN)
