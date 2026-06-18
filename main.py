@@ -13,7 +13,9 @@ client = discord.Client(intents=intents)
 
 EVENT_CHANNEL_ID = 1458936961044709539
 FURNITURE_CHANNEL_ID = 1510456653085020290
+SUPPORT_CHANNEL_ID = 1478734423972384799
 EVENT_REPLY = f"Please check <#{EVENT_CHANNEL_ID}>, anything related to events or updates will be posted there."
+SUPPORT_REPLY = f"Please file a support ticket here: <#{SUPPORT_CHANNEL_ID}> and we can help you out!"
 
 LEARNED_EXAMPLES_FILE = Path("learned_examples.json")
 
@@ -41,6 +43,29 @@ EVENT_EXAMPLES = [
     "guys is there an event",
     "does anyone know if there's an event",
     "has anyone heard about an upcoming event",
+]
+
+LOST_ITEMS_EXAMPLES = [
+    "i lost my items",
+    "i lost my inventory",
+    "my items are gone",
+    "my inventory disappeared",
+    "i lost everything in my inventory",
+    "all my items are missing",
+    "my stuff disappeared",
+    "i lost all my stuff",
+    "my items got wiped",
+    "my inventory got reset",
+    "i lost my gear",
+    "all my gear is gone",
+    "my items vanished",
+    "i can't find my items",
+    "where did my items go",
+    "my inventory is empty",
+    "i lost my weapons",
+    "my weapons disappeared",
+    "i lost my tools",
+    "everything i had is gone",
 ]
 
 NEGATIVE_EXAMPLES = [
@@ -106,6 +131,7 @@ SOFT_SIGNALS = [
 
 AUTO_LEARN_WINDOW = 0.12
 EVENT_THRESHOLD = 0.72
+LOST_ITEMS_THRESHOLD = 0.74
 NEGATIVE_PENALTY = 0.02
 
 
@@ -144,6 +170,7 @@ all_event_examples = EVENT_EXAMPLES + extra_event
 
 event_embeddings = model.encode(all_event_examples, convert_to_tensor=True)
 negative_embeddings = model.encode(NEGATIVE_EXAMPLES, convert_to_tensor=True)
+lost_items_embeddings = model.encode(LOST_ITEMS_EXAMPLES, convert_to_tensor=True)
 
 print(f"Ready. {len(all_event_examples)} event examples.")
 
@@ -211,7 +238,7 @@ def get_scores(message: str):
         top_k = torch.topk(sims, min(k, len(sims))).values
         return top_k.mean().item()
 
-    return top_mean(event_embeddings), top_mean(negative_embeddings)
+    return top_mean(event_embeddings), top_mean(negative_embeddings), top_mean(lost_items_embeddings)
 
 
 # --- BOT ---
@@ -244,12 +271,14 @@ async def on_message(message):
     if not is_question(content):
         return
 
-    event_score, negative_score = get_scores(content_lower)
+    event_score, negative_score, lost_items_score = get_scores(content_lower)
 
     penalty = max(0, (negative_score - 0.55) * 2) * NEGATIVE_PENALTY
     adj_event = event_score - penalty
 
-    if adj_event > EVENT_THRESHOLD:
+    if lost_items_score > LOST_ITEMS_THRESHOLD:
+        await message.reply(SUPPORT_REPLY)
+    elif adj_event > EVENT_THRESHOLD:
         await message.reply(EVENT_REPLY)
     else:
         negative_is_dominant = negative_score > event_score
