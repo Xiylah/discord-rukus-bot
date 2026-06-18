@@ -267,28 +267,34 @@ async def on_message(message):
         await message.reply(EVENT_REPLY)
         return
 
-    # Gate: must be a genuine question
-    if not is_question(content):
+    # Score first — lost items are statements and would be blocked by the question gate
+    event_score, negative_score, lost_items_score = get_scores(content_lower)
+
+    # Lost items check runs regardless of whether the message is a question
+    if lost_items_score > LOST_ITEMS_THRESHOLD:
+        await message.reply(SUPPORT_REPLY)
         return
 
-    event_score, negative_score, lost_items_score = get_scores(content_lower)
+    # Gate: event replies should only trigger on genuine questions
+    if not is_question(content):
+        return
 
     penalty = max(0, (negative_score - 0.55) * 2) * NEGATIVE_PENALTY
     adj_event = event_score - penalty
 
-    if lost_items_score > LOST_ITEMS_THRESHOLD:
-        await message.reply(SUPPORT_REPLY)
-    elif adj_event > EVENT_THRESHOLD:
+    if adj_event > EVENT_THRESHOLD:
         await message.reply(EVENT_REPLY)
-    else:
-        negative_is_dominant = negative_score > event_score
-        if negative_is_dominant:
-            return
+        return
 
-        near_event = EVENT_THRESHOLD - AUTO_LEARN_WINDOW < adj_event < EVENT_THRESHOLD
-        if near_event:
-            add_live_embedding(content_lower)
-            save_learned_example(content_lower)
-            await message.reply(EVENT_REPLY)
+    # Don't auto-learn or reply if a negative example is dominant
+    if negative_score > event_score:
+        return
+
+    # Near-miss: auto-learn and reply
+    if EVENT_THRESHOLD - AUTO_LEARN_WINDOW < adj_event < EVENT_THRESHOLD:
+        add_live_embedding(content_lower)
+        save_learned_example(content_lower)
+        await message.reply(EVENT_REPLY)
+
 
 client.run(TOKEN)
