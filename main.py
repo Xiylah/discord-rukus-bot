@@ -2,6 +2,7 @@ import discord
 import os
 import json
 import re
+import random
 from pathlib import Path
 from sentence_transformers import SentenceTransformer, util
 import torch
@@ -14,8 +15,32 @@ client = discord.Client(intents=intents)
 EVENT_CHANNEL_ID = 1458936961044709539
 FURNITURE_CHANNEL_ID = 1510456653085020290
 SUPPORT_CHANNEL_ID = 1478734423972384799
-EVENT_REPLY = f"Please check <#{EVENT_CHANNEL_ID}>, anything related to events or updates will be posted there."
-SUPPORT_REPLY = f"Please file a support ticket here: <#{SUPPORT_CHANNEL_ID}> and we can help you out!"
+
+EVENT_EMBEDS = [
+    ("📅 Check the Events Channel", f"Anything related to events or updates gets posted in <#{EVENT_CHANNEL_ID}>."),
+    ("👀 Events are posted here!", f"Head over to <#{EVENT_CHANNEL_ID}> for the latest event info."),
+    ("🗓️ Event info this way →", f"Keep an eye on <#{EVENT_CHANNEL_ID}> for upcoming events and schedules."),
+    ("🔔 Stay in the loop", f"All event announcements and updates are in <#{EVENT_CHANNEL_ID}>!"),
+]
+
+SUPPORT_EMBEDS = [
+    ("🎫 Need help?", f"Open a support ticket in <#{SUPPORT_CHANNEL_ID}> and the team will sort you out!"),
+    ("🛠️ Lost something?", f"File a ticket in <#{SUPPORT_CHANNEL_ID}> and we'll look into it for you."),
+    ("📬 We've got you", f"Head to <#{SUPPORT_CHANNEL_ID}> and open a ticket — we'll get it resolved."),
+    ("🆘 Let's get this fixed", f"Submit a support ticket in <#{SUPPORT_CHANNEL_ID}> and we'll help you out!"),
+]
+
+def make_event_embed() -> discord.Embed:
+    title, desc = random.choice(EVENT_EMBEDS)
+    embed = discord.Embed(title=title, description=desc, color=0x5865F2)
+    embed.set_footer(text="Automated response")
+    return embed
+
+def make_support_embed() -> discord.Embed:
+    title, desc = random.choice(SUPPORT_EMBEDS)
+    embed = discord.Embed(title=title, description=desc, color=0xED4245)
+    embed.set_footer(text="Automated response")
+    return embed
 
 LEARNED_EXAMPLES_FILE = Path("learned_examples.json")
 
@@ -264,7 +289,7 @@ async def on_message(message):
 
     # Fast path: explicit admin abuse scheduling query
     if is_admin_abuse_query(content_lower):
-        await message.reply(EVENT_REPLY)
+        await message.reply(embed=make_event_embed())
         return
 
     # Score first — lost items are statements and would be blocked by the question gate
@@ -272,7 +297,7 @@ async def on_message(message):
 
     # Lost items check runs regardless of whether the message is a question
     if lost_items_score > LOST_ITEMS_THRESHOLD:
-        await message.reply(SUPPORT_REPLY)
+        await message.reply(embed=make_support_embed())
         return
 
     # Gate: event replies should only trigger on genuine questions
@@ -283,7 +308,7 @@ async def on_message(message):
     adj_event = event_score - penalty
 
     if adj_event > EVENT_THRESHOLD:
-        await message.reply(EVENT_REPLY)
+        await message.reply(embed=make_event_embed())
         return
 
     # Don't auto-learn or reply if a negative example is dominant
@@ -294,7 +319,7 @@ async def on_message(message):
     if EVENT_THRESHOLD - AUTO_LEARN_WINDOW < adj_event < EVENT_THRESHOLD:
         add_live_embedding(content_lower)
         save_learned_example(content_lower)
-        await message.reply(EVENT_REPLY)
+        await message.reply(embed=make_event_embed())
 
 
 client.run(TOKEN)
