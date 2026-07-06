@@ -696,16 +696,17 @@ async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
 
-        # One-time cleanup: if a previous deploy registered commands GLOBALLY,
-        # set CLEAR_GLOBAL=1 in Railway env for a single run to remove them,
-        # then remove the variable. This prevents duplicate entries.
-        if os.getenv("CLEAR_GLOBAL") == "1":
-            bot.tree.clear_commands(guild=None)
-            await bot.tree.sync()  # empties the global scope on Discord's side
-            print("Cleared global commands. Remove CLEAR_GLOBAL and redeploy.")
-
-        # Normal path: copy code-defined commands to the guild and sync (instant).
+        # 1. Copy code-defined commands onto the guild scope FIRST, while they're
+        #    still present in the in-memory tree.
         bot.tree.copy_global_to(guild=guild)
+
+        # 2. Remove the GLOBAL registrations on Discord's side (stale duplicates
+        #    from earlier deploys). Clearing only the global scope does NOT affect
+        #    the guild copies we just made above.
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()  # pushes empty global set -> deletes global dupes
+
+        # 3. Sync the guild scope (instant). These are the commands users see.
         synced = await bot.tree.sync(guild=guild)
         print(f"Synced {len(synced)} command(s) to guild {GUILD_ID}.")
     except Exception as e:
