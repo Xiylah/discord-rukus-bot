@@ -1,3 +1,4 @@
 discord.py
 sentence-transformers
 torch
+deep-translator
