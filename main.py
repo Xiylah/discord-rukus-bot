@@ -221,6 +221,32 @@ def _strippable(text: str) -> str:
     t = _EMOJI_UNICODE_RE.sub(" ", t)
     return re.sub(r"\s+", " ", t).strip()
 
+
+# Common chat slang that shouldn't trigger translation on its own.
+SLANG_TERMS = {
+    "ty", "tysm", "thx", "thanks", "np", "yw", "wyd", "wym", "hru",
+    "wbu", "wb", "gg", "glhf", "brb", "afk", "gtg", "g2g", "ttyl",
+    "lol", "lmao", "lmfao", "rofl", "lmaooo", "omg", "omfg", "wtf",
+    "idk", "idc", "ikr", "imo", "imho", "tbh", "ngl", "fr", "frfr",
+    "smh", "istg", "irl", "dm", "pm", "afaik", "asap", "aka", "btw",
+    "nvm", "rn", "atm", "ez", "op", "pog", "poggers", "w", "l",
+    "ratio", "based", "cap", "nocap", "bet", "fam", "bruh", "bro",
+    "yo", "sup", "wsg", "wassup", "ong", "icl", "lowkey", "highkey",
+    "sus", "goat", "mid", "gyat", "rizz", "fyp", "sheesh", "yeet",
+    "oof", "yikes", "welp", "meh", "eh", "hmm", "ok", "okay", "kk",
+    "k", "yeah", "yea", "yep", "nah", "nope", "ye", "ya", "u", "ur",
+    "pls", "plz", "plss", "ffs", "wdym",
+}
+
+# Keep only letters/digits/spaces so "ty!" or "wyd??" still match
+_SLANG_CLEAN_RE = re.compile(r"[^\w\s]")
+
+def strip_slang(text: str) -> str:
+    """Remove standalone slang tokens; return whatever real text is left."""
+    cleaned = _SLANG_CLEAN_RE.sub(" ", text.lower())
+    kept = [w for w in cleaned.split() if w not in SLANG_TERMS]
+    return " ".join(kept).strip()
+
 def translate_text(text: str, target: str = "en"):
     """
     Translate text into `target` language code.
@@ -229,6 +255,10 @@ def translate_text(text: str, target: str = "en"):
     core = _strippable(text)
     if len(core) < TRANSLATE_MIN_LEN:
         return None, "too_short"
+
+    # If removing standalone slang leaves nothing meaningful, don't translate
+    if len(strip_slang(core)) < TRANSLATE_MIN_LEN:
+        return None, "slang_only"
 
     try:
         translator = GoogleTranslator(source="auto", target=target)
@@ -601,11 +631,16 @@ async def translate_context_menu(interaction: discord.Interaction, message: disc
 
 # --- READY / SYNC ---
 
+# Your server ID — guild-scoped sync makes commands appear instantly.
+GUILD_ID = 700382994946588814
+
 @bot.event
 async def on_ready():
     try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} application command(s).")
+        guild = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"Synced {len(synced)} command(s) to guild {GUILD_ID}.")
     except Exception as e:
         print(f"[warn] Command sync failed: {e}")
     print(f"Logged in as {bot.user}.")
