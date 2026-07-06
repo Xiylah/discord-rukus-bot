@@ -160,6 +160,31 @@ LOST_ITEMS_THRESHOLD = 0.74
 NEGATIVE_PENALTY = 0.02
 
 
+# --- DRUG / SUBSTANCE FILTER ---
+
+DRUG_TERMS = [
+    "weed", "marijuana", "cannabis", "blunt", "bong", "dank",
+    "kush", "reefer", "ganja", "420", "thc", "cbd", "edibles",
+    "xan", "xanax", "xannies", "percs", "percocet", "oxycontin",
+    "vicodin", "adderall", "addy", "molly", "mdma", "ecstasy",
+    "cocaine", "meth", "heroin", "fentanyl", "fent", "lsd",
+    "shrooms", "ketamine", "vape", "vaping", "juul",
+    "dab", "dabs",
+]
+
+# Match whole words only, so "potato" or "escape" won't trigger
+DRUG_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(t) for t in DRUG_TERMS) + r")\b",
+    re.IGNORECASE,
+)
+
+DRUG_WARNINGS = [
+    "Please keep all conversations appropriate for all ages. 🙏",
+    "Let's keep the chat family-friendly for everyone here!",
+    "Reminder: please keep all discussion appropriate for all ages.",
+]
+
+
 # --- PERSISTENCE ---
 
 def load_learned_examples():
@@ -282,6 +307,19 @@ async def on_message(message):
         return
 
     content = message.content.strip()
+
+    # Drug/substance filter — delete and warn (runs on all channels except furniture)
+    if DRUG_PATTERN.search(content):
+        try:
+            await message.delete()
+        except discord.errors.NotFound:
+            pass
+        await message.channel.send(
+            f"{message.author.mention} {random.choice(DRUG_WARNINGS)}",
+            delete_after=10,
+        )
+        return
+
     if not content or len(content) < 8:
         return
 
