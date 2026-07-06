@@ -332,6 +332,50 @@ LANGUAGE_CHOICES = {
     "Ukrainian": "uk", "Greek": "el", "Swedish": "sv",
 }
 
+# Broader code -> readable name map for language detection results
+# (detection can return languages not offered in the translate menu)
+LANG_CODE_TO_NAME = {
+    "en": "English", "es": "Spanish", "fr": "French", "pt": "Portuguese",
+    "de": "German", "it": "Italian", "nl": "Dutch", "ru": "Russian",
+    "ja": "Japanese", "ko": "Korean", "zh-CN": "Chinese (Simplified)",
+    "zh-TW": "Chinese (Traditional)", "ar": "Arabic", "hi": "Hindi",
+    "tr": "Turkish", "pl": "Polish", "vi": "Vietnamese", "th": "Thai",
+    "id": "Indonesian", "tl": "Filipino", "uk": "Ukrainian", "el": "Greek",
+    "sv": "Swedish", "da": "Danish", "no": "Norwegian", "fi": "Finnish",
+    "ro": "Romanian", "hu": "Hungarian", "cs": "Czech", "sk": "Slovak",
+    "iw": "Hebrew", "he": "Hebrew", "fa": "Persian", "ur": "Urdu",
+    "bn": "Bengali", "ms": "Malay", "bg": "Bulgarian", "hr": "Croatian",
+    "sr": "Serbian", "sl": "Slovenian", "lt": "Lithuanian", "lv": "Latvian",
+    "et": "Estonian", "ca": "Catalan", "ta": "Tamil", "te": "Telugu",
+    "ml": "Malayalam", "kn": "Kannada", "gu": "Gujarati", "mr": "Marathi",
+    "pa": "Punjabi", "af": "Afrikaans", "sw": "Swahili", "tl-ph": "Filipino",
+}
+
+def detect_language(text: str):
+    """
+    Detect the language of `text` using the free Google endpoint.
+    Returns (code, readable_name) or (None, None).
+    Works by asking the translator to auto-detect while translating to English.
+    """
+    core = _strippable(text)
+    if len(core) < TRANSLATE_MIN_LEN:
+        return None, None
+    try:
+        translator = GoogleTranslator(source="auto", target="en")
+        translator.translate(core)  # populates detected source
+        code = getattr(translator, "source", None)
+    except (RequestError, TooManyRequests) as e:
+        print(f"[detect] backend error: {e}")
+        return None, None
+    except Exception as e:
+        print(f"[detect] unexpected error: {e}")
+        return None, None
+
+    if not code or code == "auto":
+        return None, None
+    name = LANG_CODE_TO_NAME.get(code, code.upper())
+    return code, name
+
 
 # --- PERSISTENCE ---
 
@@ -581,52 +625,65 @@ async def translate_command(
     )
 
 
-# --- CONTEXT MENU: right-click a message -> Translate (asks for language) ---
+# --- CONTEXT MENUS: right-click a message -> Apps -> Translate to <language> ---
 
-class LanguageSelect(discord.ui.Select):
-    def __init__(self, source_text: str):
-        self.source_text = source_text
-        options = [
-            discord.SelectOption(label=name, value=code)
-            for name, code in list(LANGUAGE_CHOICES.items())[:25]  # Discord caps at 25
-        ]
-        super().__init__(placeholder="Translate to…", options=options, min_values=1, max_values=1)
-
-    async def callback(self, interaction: discord.Interaction):
-        target = self.values[0]
-        translated, src = translate_text(self.source_text, target=target)
-        if not translated:
-            await interaction.response.edit_message(
-                content="Couldn't translate that (too short, same language, or service busy).",
-                view=None,
-            )
-            return
-        await interaction.response.edit_message(
-            content=None,
-            embed=make_translation_embed(translated, src, target, requester=interaction.user.display_name),
-            view=None,
-        )
-
-
-class LanguageView(discord.ui.View):
-    def __init__(self, source_text: str):
-        super().__init__(timeout=60)
-        self.add_item(LanguageSelect(source_text))
-
-
-@bot.tree.context_menu(name="Translate")
-async def translate_context_menu(interaction: discord.Interaction, message: discord.Message):
+async def _context_translate(interaction: discord.Interaction, message: discord.Message, target: str):
+    """Shared handler: translate the right-clicked message into `target`."""
     if not message.content or not message.content.strip():
         await interaction.response.send_message(
             "That message has no text to translate.", ephemeral=True
         )
         return
-    view = LanguageView(message.content)
+    translated, src = translate_text(message.content, target=target)
+    if not translated:
+        await interaction.response.send_message(
+            "Couldn't translate that — it may be too short, slang, already in that "
+            "language, or the service is busy.",
+            ephemeral=True,
+        )
+        return
     await interaction.response.send_message(
-        "Pick a language to translate this message into:",
-        view=view,
-        ephemeral=True,
+        embed=make_translation_embed(translated, src, target, requester=interaction.user.display_name)
     )
+
+
+@bot.tree.context_menu(name="Translate to English")
+async def translate_to_english(interaction: discord.Interaction, message: discord.Message):
+    await _context_translate(interaction, message, "en")
+
+
+@bot.tree.context_menu(name="Translate to French")
+async def translate_to_french(interaction: discord.Interaction, message: discord.Message):
+    await _context_translate(interaction, message, "fr")
+
+
+@bot.tree.context_menu(name="Translate to Spanish")
+async def translate_to_spanish(interaction: discord.Interaction, message: discord.Message):
+    await _context_translate(interaction, message, "es")
+
+
+@bot.tree.context_menu(name="Detect Language")
+async def detect_language_menu(interaction: discord.Interaction, message: discord.Message):
+    if not message.content or not message.content.strip():
+        await interaction.response.send_message(
+            "That message has no text to analyze.", ephemeral=True
+        )
+        return
+    code, name = detect_language(message.content)
+    if not code:
+        await interaction.response.send_message(
+            "Couldn't detect the language — the message may be too short, slang, "
+            "or the service is busy.",
+            ephemeral=True,
+        )
+        return
+    embed = discord.Embed(
+        title="🔎 Language Detected",
+        description=f"This message appears to be **{name}** (`{code}`).",
+        color=0x5865F2,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 
 # --- READY / SYNC ---
@@ -638,6 +695,16 @@ GUILD_ID = 700382994946588814
 async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
+
+        # One-time cleanup: if a previous deploy registered commands GLOBALLY,
+        # set CLEAR_GLOBAL=1 in Railway env for a single run to remove them,
+        # then remove the variable. This prevents duplicate entries.
+        if os.getenv("CLEAR_GLOBAL") == "1":
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()  # empties the global scope on Discord's side
+            print("Cleared global commands. Remove CLEAR_GLOBAL and redeploy.")
+
+        # Normal path: copy code-defined commands to the guild and sync (instant).
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
         print(f"Synced {len(synced)} command(s) to guild {GUILD_ID}.")
