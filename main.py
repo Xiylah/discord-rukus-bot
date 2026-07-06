@@ -1,4 +1,6 @@
 import discord
+from discord import app_commands
+from discord.ext import commands
 import os
 import json
 import re
@@ -6,11 +8,22 @@ import random
 from pathlib import Path
 from sentence_transformers import SentenceTransformer, util
 import torch
+from deep_translator import GoogleTranslator
+from deep_translator.exceptions import (
+    NotValidPayload,
+    TranslationNotFound,
+    RequestError,
+    TooManyRequests,
+)
 
 TOKEN = os.getenv("TOKEN")
+
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+intents.reactions = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 EVENT_CHANNEL_ID = 1458936961044709539
 FURNITURE_CHANNEL_ID = 1510456653085020290
@@ -185,6 +198,111 @@ DRUG_WARNINGS = [
 ]
 
 
+# --- TRANSLATION CORE ---
+
+# Don't translate messages shorter than this (emotes, "gg", "lol", etc.)
+TRANSLATE_MIN_LEN = 12
+
+_URL_RE = re.compile(r"https?://\S+")
+_MENTION_RE = re.compile(r"<[@#!&:][^>]+>")      # mentions + custom emoji
+_EMOJI_UNICODE_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0001F1E6-\U0001F1FF"
+    "]+",
+    flags=re.UNICODE,
+)
+
+def _strippable(text: str) -> str:
+    """Remove URLs, mentions, and emoji to see if any real language remains."""
+    t = _URL_RE.sub(" ", text)
+    t = _MENTION_RE.sub(" ", t)
+    t = _EMOJI_UNICODE_RE.sub(" ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+def translate_text(text: str, target: str = "en"):
+    """
+    Translate text into `target` language code.
+    Returns (translated_text, detected_source) or (None, reason_string).
+    """
+    core = _strippable(text)
+    if len(core) < TRANSLATE_MIN_LEN:
+        return None, "too_short"
+
+    try:
+        translator = GoogleTranslator(source="auto", target=target)
+        translated = translator.translate(core)
+    except (NotValidPayload, TranslationNotFound):
+        return None, "no_translation"
+    except (RequestError, TooManyRequests) as e:
+        print(f"[translate] backend error: {e}")
+        return None, "backend_error"
+    except Exception as e:
+        print(f"[translate] unexpected error: {e}")
+        return None, "error"
+
+    if not translated:
+        return None, "empty"
+
+    src = getattr(translator, "source", "auto")
+
+    # If result equals input AND we were targeting English, it was already English
+    if target == "en" and translated.strip().lower() == core.strip().lower():
+        return None, "already_target"
+
+    return translated, src
+
+def make_translation_embed(translated: str, src: str, target: str, requester: str = None) -> discord.Embed:
+    src_label = src.upper() if src and src != "auto" else "Auto-detected"
+    embed = discord.Embed(
+        title="🌐 Translation",
+        description=translated[:4000],
+        color=0x57F287,
+    )
+    footer = f"{src_label} → {target.upper()}"
+    if requester:
+        footer += f" • requested by {requester}"
+    embed.set_footer(text=footer)
+    return embed
+
+
+# --- FLAG EMOJI -> LANGUAGE ---
+
+def flag_to_country_code(emoji: str):
+    """Convert a flag emoji (two regional-indicator chars) to its ISO country code."""
+    if len(emoji) != 2:
+        return None
+    cps = [ord(c) for c in emoji]
+    if not all(0x1F1E6 <= cp <= 0x1F1FF for cp in cps):
+        return None
+    return "".join(chr(cp - 0x1F1E6 + ord("A")) for cp in cps)
+
+# Country code -> deep_translator language code
+COUNTRY_TO_LANG = {
+    "US": "en", "GB": "en", "AU": "en", "CA": "en", "IE": "en", "NZ": "en",
+    "FR": "fr", "ES": "es", "MX": "es", "AR": "es", "CO": "es", "CL": "es",
+    "BR": "pt", "PT": "pt", "DE": "de", "AT": "de", "IT": "it",
+    "JP": "ja", "KR": "ko", "CN": "zh-CN", "TW": "zh-TW", "HK": "zh-TW",
+    "RU": "ru", "SA": "ar", "AE": "ar", "EG": "ar", "IN": "hi",
+    "NL": "nl", "BE": "nl", "PL": "pl", "TR": "tr", "VN": "vi",
+    "TH": "th", "ID": "id", "PH": "tl", "SE": "sv", "NO": "no",
+    "DK": "da", "FI": "fi", "GR": "el", "UA": "uk", "RO": "ro",
+    "HU": "hu", "CZ": "cs", "SK": "sk", "IL": "iw", "IR": "fa",
+    "PK": "ur", "BD": "bn", "MY": "ms", "BG": "bg", "HR": "hr",
+}
+
+# Common language names for the dropdown / slash-command choices
+LANGUAGE_CHOICES = {
+    "English": "en", "Spanish": "es", "French": "fr", "Portuguese": "pt",
+    "German": "de", "Italian": "it", "Dutch": "nl", "Russian": "ru",
+    "Japanese": "ja", "Korean": "ko", "Chinese (Simplified)": "zh-CN",
+    "Arabic": "ar", "Hindi": "hi", "Turkish": "tr", "Polish": "pl",
+    "Vietnamese": "vi", "Thai": "th", "Indonesian": "id", "Filipino": "tl",
+    "Ukrainian": "uk", "Greek": "el", "Swedish": "sv",
+}
+
+
 # --- PERSISTENCE ---
 
 def load_learned_examples():
@@ -291,9 +409,9 @@ def get_scores(message: str):
     return top_mean(event_embeddings), top_mean(negative_embeddings), top_mean(lost_items_embeddings)
 
 
-# --- BOT ---
+# --- MESSAGE HANDLER ---
 
-@client.event
+@bot.event
 async def on_message(message):
     if message.author.bot:
         return
@@ -308,7 +426,7 @@ async def on_message(message):
 
     content = message.content.strip()
 
-    # Drug/substance filter — delete and warn (runs on all channels except furniture)
+    # Drug/substance filter — delete and warn
     if DRUG_PATTERN.search(content):
         try:
             await message.delete()
@@ -359,5 +477,138 @@ async def on_message(message):
         save_learned_example(content_lower)
         await message.reply(embed=make_event_embed())
 
+    # Allow prefix command processing (future-proof; harmless alongside slash cmds)
+    await bot.process_commands(message)
 
-client.run(TOKEN)
+
+# --- FLAG REACTION -> TRANSLATE ---
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    # Ignore the bot's own reactions
+    if bot.user and payload.user_id == bot.user.id:
+        return
+
+    emoji = str(payload.emoji)
+    country = flag_to_country_code(emoji)
+    if not country:
+        return  # not a flag emoji
+
+    target_lang = COUNTRY_TO_LANG.get(country)
+    if not target_lang:
+        return  # flag we don't have a language mapping for
+
+    channel = bot.get_channel(payload.channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(payload.channel_id)
+        except (discord.NotFound, discord.Forbidden):
+            return
+
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except (discord.NotFound, discord.Forbidden):
+        return
+
+    if not message.content or not message.content.strip():
+        return
+
+    translated, src = translate_text(message.content, target=target_lang)
+    if not translated:
+        return  # too short, already that language, or backend hiccup — stay silent
+
+    reactor = payload.member.mention if payload.member else "someone"
+    await message.reply(
+        content=f"{reactor} requested a translation:",
+        embed=make_translation_embed(translated, src, target_lang),
+        mention_author=False,
+    )
+
+
+# --- SLASH COMMAND: /translate ---
+
+@bot.tree.command(name="translate", description="Translate text into a chosen language")
+@app_commands.describe(text="The text to translate", to="Target language")
+@app_commands.choices(
+    to=[app_commands.Choice(name=name, value=code) for name, code in LANGUAGE_CHOICES.items()]
+)
+async def translate_command(
+    interaction: discord.Interaction,
+    text: str,
+    to: app_commands.Choice[str] = None,
+):
+    target = to.value if to else "en"
+    translated, src = translate_text(text, target=target)
+    if not translated:
+        await interaction.response.send_message(
+            "Couldn't translate that — it may be too short, already in that language, "
+            "or the translation service is busy. Try again in a moment.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_message(
+        embed=make_translation_embed(translated, src, target, requester=interaction.user.display_name)
+    )
+
+
+# --- CONTEXT MENU: right-click a message -> Translate (asks for language) ---
+
+class LanguageSelect(discord.ui.Select):
+    def __init__(self, source_text: str):
+        self.source_text = source_text
+        options = [
+            discord.SelectOption(label=name, value=code)
+            for name, code in list(LANGUAGE_CHOICES.items())[:25]  # Discord caps at 25
+        ]
+        super().__init__(placeholder="Translate to…", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        target = self.values[0]
+        translated, src = translate_text(self.source_text, target=target)
+        if not translated:
+            await interaction.response.edit_message(
+                content="Couldn't translate that (too short, same language, or service busy).",
+                view=None,
+            )
+            return
+        await interaction.response.edit_message(
+            content=None,
+            embed=make_translation_embed(translated, src, target, requester=interaction.user.display_name),
+            view=None,
+        )
+
+
+class LanguageView(discord.ui.View):
+    def __init__(self, source_text: str):
+        super().__init__(timeout=60)
+        self.add_item(LanguageSelect(source_text))
+
+
+@bot.tree.context_menu(name="Translate")
+async def translate_context_menu(interaction: discord.Interaction, message: discord.Message):
+    if not message.content or not message.content.strip():
+        await interaction.response.send_message(
+            "That message has no text to translate.", ephemeral=True
+        )
+        return
+    view = LanguageView(message.content)
+    await interaction.response.send_message(
+        "Pick a language to translate this message into:",
+        view=view,
+        ephemeral=True,
+    )
+
+
+# --- READY / SYNC ---
+
+@bot.event
+async def on_ready():
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} application command(s).")
+    except Exception as e:
+        print(f"[warn] Command sync failed: {e}")
+    print(f"Logged in as {bot.user}.")
+
+
+bot.run(TOKEN)
