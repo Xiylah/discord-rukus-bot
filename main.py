@@ -392,6 +392,14 @@ def translate_text(text: str, target: str = "en"):
     if len(strip_slang(core)) < TRANSLATE_MIN_LEN:
         return None, "slang_only"
 
+    # Gamertag/leetspeak gate: tokens with digits fused into them ("PRBL3M",
+    # "CHILD98") are usernames/codes, not language. Remove them for the
+    # DECISION only; if nothing meaningful remains, skip. Real foreign text
+    # with incidental numbers ("je gagne 500 robux") keeps enough and passes.
+    no_digit_tokens = " ".join(w for w in core.split() if not any(c.isdigit() for c in w))
+    if len(no_digit_tokens) < TRANSLATE_MIN_LEN:
+        return None, "no_real_words"
+
     # Local detection: skip if we're confident it's ALREADY the target language.
     # (Only a skip optimization — we never trust this to relabel a translation.)
     code, conf = local_detect(core)
