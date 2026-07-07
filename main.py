@@ -5,6 +5,7 @@ import os
 import json
 import re
 import random
+import asyncio
 from pathlib import Path
 from sentence_transformers import SentenceTransformer, util
 import torch
@@ -358,6 +359,13 @@ def translate_text(text: str, target: str = "en"):
     _cache_put(key, result)
     return result
 
+
+async def translate_text_async(text: str, target: str = "en"):
+    """Run the (blocking) translation off the event loop so it never freezes
+    Discord's heartbeat. Cache hits and local-skip cases return fast anyway,
+    but the API path can take seconds — that must not block the loop."""
+    return await asyncio.to_thread(translate_text, text, target)
+
 def make_translation_embed(translated: str, src: str, target: str, requester: str = None) -> discord.Embed:
     src_label = src.upper() if src and src != "auto" else "Auto-detected"
     embed = discord.Embed(
@@ -558,6 +566,12 @@ def get_scores(message: str):
     return top_mean(event_embeddings), top_mean(negative_embeddings), top_mean(lost_items_embeddings)
 
 
+async def get_scores_async(message: str):
+    """Run the sentence-transformer encoding off the event loop. The model
+    forward pass is CPU-heavy and was blocking Discord's heartbeat."""
+    return await asyncio.to_thread(get_scores, message)
+
+
 # --- MESSAGE HANDLER ---
 
 @bot.event
@@ -592,13 +606,23 @@ async def on_message(message):
 
     content_lower = content.lower()
 
+    # Automatic translation: if the message isn't English, reply with an English
+    # version. translate_text() handles all the skipping (English, slang, short,
+    # cached) internally, so we only post when it actually returns something.
+    auto_translated, auto_src = await translate_text_async(content, target="en")
+    if auto_translated:
+        await message.reply(
+            embed=make_translation_embed(auto_translated, auto_src, "en"),
+            mention_author=False,
+        )
+
     # Fast path: explicit admin abuse scheduling query
     if is_admin_abuse_query(content_lower):
         await message.reply(embed=make_event_embed())
         return
 
     # Score first — lost items are statements and would be blocked by the question gate
-    event_score, negative_score, lost_items_score = get_scores(content_lower)
+    event_score, negative_score, lost_items_score = await get_scores_async(content_lower)
 
     # Lost items check runs regardless of whether the message is a question
     if lost_items_score > LOST_ITEMS_THRESHOLD:
@@ -662,7 +686,7 @@ async def on_raw_reaction_add(payload):
     if not message.content or not message.content.strip():
         return
 
-    translated, src = translate_text(message.content, target=target_lang)
+    translated, src = await translate_text_async(message.content, target=target_lang)
     if not translated:
         return  # too short, already that language, or backend hiccup — stay silent
 
@@ -687,15 +711,16 @@ async def translate_command(
     to: app_commands.Choice[str] = None,
 ):
     target = to.value if to else "en"
-    translated, src = translate_text(text, target=target)
+    await interaction.response.defer(thinking=True)
+    translated, src = await translate_text_async(text, target=target)
     if not translated:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Couldn't translate that — it may be too short, already in that language, "
             "or the translation service is busy. Try again in a moment.",
             ephemeral=True,
         )
         return
-    await interaction.response.send_message(
+    await interaction.followup.send(
         embed=make_translation_embed(translated, src, target, requester=interaction.user.display_name)
     )
 
@@ -709,15 +734,17 @@ async def _context_translate(interaction: discord.Interaction, message: discord.
             "That message has no text to translate.", ephemeral=True
         )
         return
-    translated, src = translate_text(message.content, target=target)
+    # Acknowledge within Discord's 3s window; actual work can take longer.
+    await interaction.response.defer(thinking=True)
+    translated, src = await translate_text_async(message.content, target=target)
     if not translated:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Couldn't translate that — it may be too short, slang, already in that "
             "language, or the service is busy.",
             ephemeral=True,
         )
         return
-    await interaction.response.send_message(
+    await interaction.followup.send(
         embed=make_translation_embed(translated, src, target, requester=interaction.user.display_name)
     )
 
@@ -744,9 +771,10 @@ async def detect_language_menu(interaction: discord.Interaction, message: discor
             "That message has no text to analyze.", ephemeral=True
         )
         return
-    code, name = detect_language(message.content)
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    code, name = await asyncio.to_thread(detect_language, message.content)
     if not code:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Couldn't detect the language — the message may be too short, slang, "
             "or the service is busy.",
             ephemeral=True,
@@ -757,7 +785,7 @@ async def detect_language_menu(interaction: discord.Interaction, message: discor
         description=f"This message appears to be **{name}** (`{code}`).",
         color=0x5865F2,
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 
