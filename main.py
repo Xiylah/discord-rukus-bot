@@ -6,6 +6,7 @@ import json
 import re
 import random
 import asyncio
+import threading
 from pathlib import Path
 from sentence_transformers import SentenceTransformer, util
 import torch
@@ -217,7 +218,7 @@ DRUG_WARNINGS = [
 TRANSLATE_MIN_LEN = 12
 
 _URL_RE = re.compile(r"https?://\S+")
-_MENTION_RE = re.compile(r"<[@#!&:][^>]+>")      # mentions + custom emoji
+_MENTION_RE = re.compile(r"<a?[@#!&:][^>]+>")    # mentions + custom emoji (incl. animated <a:...>)
 _EMOJI_UNICODE_RE = re.compile(
     "["
     "\U0001F300-\U0001FAFF"
@@ -264,20 +265,24 @@ def strip_slang(text: str) -> str:
 
 # Bounded LRU cache: (core_text_lower, target) -> (translated, src)
 # Avoids re-calling the API for repeated phrases; also cuts rate-limit risk.
+# translate_text runs in worker threads (asyncio.to_thread), so guard with a lock.
 _TRANSLATION_CACHE = OrderedDict()
 _CACHE_MAX = 500
+_CACHE_LOCK = threading.Lock()
 
 def _cache_get(key):
-    if key in _TRANSLATION_CACHE:
-        _TRANSLATION_CACHE.move_to_end(key)  # mark as recently used
-        return _TRANSLATION_CACHE[key]
-    return None
+    with _CACHE_LOCK:
+        if key in _TRANSLATION_CACHE:
+            _TRANSLATION_CACHE.move_to_end(key)  # mark as recently used
+            return _TRANSLATION_CACHE[key]
+        return None
 
 def _cache_put(key, value):
-    _TRANSLATION_CACHE[key] = value
-    _TRANSLATION_CACHE.move_to_end(key)
-    while len(_TRANSLATION_CACHE) > _CACHE_MAX:
-        _TRANSLATION_CACHE.popitem(last=False)  # evict oldest
+    with _CACHE_LOCK:
+        _TRANSLATION_CACHE[key] = value
+        _TRANSLATION_CACHE.move_to_end(key)
+        while len(_TRANSLATION_CACHE) > _CACHE_MAX:
+            _TRANSLATION_CACHE.popitem(last=False)  # evict oldest
 
 # Confidence needed to TRUST a local "already in target language" skip.
 # High on purpose: langdetect is unreliable on short/slangy text, so we only
@@ -331,6 +336,14 @@ if _DEEPL_LIB_OK and DEEPL_API_KEY:
         _deepl_client = None
 else:
     print("DeepL not configured — using Google only. Set DEEPL_API_KEY to enable.")
+
+
+def _norm_for_compare(s: str) -> str:
+    """Lowercase, drop punctuation, collapse whitespace — so 'Goodbye, clanker!'
+    and 'goodbye clanker' compare as identical. Used to detect when a translation
+    came back essentially unchanged (i.e. the text was already the target lang)."""
+    return " ".join(re.sub(r"[^\w\s]", " ", s).lower().split())
+
 
 def _deepl_translate(core: str, target: str):
     """Try DeepL. Returns (translated, src_lang) or None to signal fallback."""
@@ -398,6 +411,11 @@ def translate_text(text: str, target: str = "en"):
     # fall back to Google for unsupported languages, quota, or any DeepL error.
     deepl_result = _deepl_translate(core, target)
     if deepl_result is not None:
+        d_text, d_src = deepl_result
+        # If the "translation" is essentially the input, it was already the
+        # target language (e.g. English -> English). Don't post anything.
+        if _norm_for_compare(d_text) == _norm_for_compare(core):
+            return None, "already_target"
         _cache_put(key, deepl_result)
         return deepl_result
 
@@ -417,10 +435,16 @@ def translate_text(text: str, target: str = "en"):
     if not translated:
         return None, "empty"
 
-    src = getattr(translator, "source", "auto")
+    # deep-translator never reports the detected source (stays "auto"), so
+    # label the footer with a confident local detection when we have one.
+    src = "auto"
+    d_code, d_conf = local_detect(core)
+    if d_code and d_conf >= _DETECT_SKIP_CONFIDENCE:
+        src = d_code.split("-")[0].lower()
 
-    # If result equals input AND we targeted English, it was already English
-    if target == "en" and translated.strip().lower() == core.strip().lower():
+    # If the result is essentially the input, the text was already the target
+    # language — applies to any target, not just English. Don't post anything.
+    if _norm_for_compare(translated) == _norm_for_compare(core):
         return None, "already_target"
 
     result = (translated, src)
@@ -504,28 +528,36 @@ LANG_CODE_TO_NAME = {
 
 def detect_language(text: str):
     """
-    Detect the language of `text` using the free Google endpoint.
-    Returns (code, readable_name) or (None, None).
-    Works by asking the translator to auto-detect while translating to English.
+    Detect the language of `text`. Returns (code, readable_name) or (None, None).
+
+    NOTE: deep-translator's GoogleTranslator never exposes the detected source
+    (its .source stays "auto"), so the old Google-based approach could not work.
+    Order here: DeepL's real detected_source_lang (accurate) -> langdetect
+    (local, only trusted at high confidence).
     """
     core = _strippable(text)
     if len(core) < TRANSLATE_MIN_LEN:
         return None, None
-    try:
-        translator = GoogleTranslator(source="auto", target="en")
-        translator.translate(core)  # populates detected source
-        code = getattr(translator, "source", None)
-    except (RequestError, TooManyRequests) as e:
-        print(f"[detect] backend error: {e}")
-        return None, None
-    except Exception as e:
-        print(f"[detect] unexpected error: {e}")
-        return None, None
 
-    if not code or code == "auto":
-        return None, None
-    name = LANG_CODE_TO_NAME.get(code, code.upper())
-    return code, name
+    # 1. DeepL: translate to English and read the genuinely-detected source.
+    if _deepl_client is not None:
+        try:
+            result = _deepl_client.translate_text(core, target_lang="EN-US")
+            code = (getattr(result, "detected_source_lang", "") or "").lower()
+            if code:
+                name = LANG_CODE_TO_NAME.get(code, code.upper())
+                return code, name
+        except Exception as e:
+            print(f"[detect] deepl error, trying local: {e}")
+
+    # 2. Local langdetect fallback — only trust confident results.
+    code, conf = local_detect(core)
+    if code and conf >= _DETECT_SKIP_CONFIDENCE:
+        base = code.split("-")[0].lower()
+        name = LANG_CODE_TO_NAME.get(code, LANG_CODE_TO_NAME.get(base, code.upper()))
+        return code, name
+
+    return None, None
 
 
 # --- PERSISTENCE ---
@@ -567,12 +599,18 @@ lost_items_embeddings = model.encode(LOST_ITEMS_EXAMPLES, convert_to_tensor=True
 
 print(f"Ready. {len(all_event_examples)} event examples.")
 
+# get_scores runs in worker threads while add_live_embedding mutates
+# event_embeddings on the loop thread — serialize model access with a lock.
+# Also prevents concurrent encodes from stacking up CPU/memory on Railway.
+_MODEL_LOCK = threading.Lock()
+
 
 def add_live_embedding(text: str):
     global event_embeddings
-    new_emb = model.encode(text, convert_to_tensor=True).unsqueeze(0)
-    event_embeddings = torch.cat([event_embeddings, new_emb], dim=0)
-    all_event_examples.append(text)
+    with _MODEL_LOCK:
+        new_emb = model.encode(text, convert_to_tensor=True).unsqueeze(0)
+        event_embeddings = torch.cat([event_embeddings, new_emb], dim=0)
+        all_event_examples.append(text)
 
 
 # --- CLASSIFICATION ---
@@ -624,14 +662,16 @@ def is_admin_abuse_query(text: str) -> bool:
 def get_scores(message: str):
     """Score the semantic core (filler-stripped) text against all example banks."""
     core = strip_filler(message)
-    msg_emb = model.encode(core, convert_to_tensor=True)
+    with _MODEL_LOCK:
+        msg_emb = model.encode(core, convert_to_tensor=True)
+        emb_banks = (event_embeddings, negative_embeddings, lost_items_embeddings)
 
-    def top_mean(emb_bank, k=2):
-        sims = util.cos_sim(msg_emb, emb_bank)[0]
-        top_k = torch.topk(sims, min(k, len(sims))).values
-        return top_k.mean().item()
+        def top_mean(emb_bank, k=2):
+            sims = util.cos_sim(msg_emb, emb_bank)[0]
+            top_k = torch.topk(sims, min(k, len(sims))).values
+            return top_k.mean().item()
 
-    return top_mean(event_embeddings), top_mean(negative_embeddings), top_mean(lost_items_embeddings)
+        return tuple(top_mean(bank) for bank in emb_banks)
 
 
 async def get_scores_async(message: str):
@@ -724,6 +764,21 @@ async def on_message(message):
 
 # --- FLAG REACTION -> TRANSLATE ---
 
+# Dedup: if several people react the same flag to the same message, reply once.
+# Bounded so it can't grow forever.
+_SERVED_REACTIONS = OrderedDict()
+_SERVED_MAX = 1000
+
+def _already_served(message_id: int, lang: str) -> bool:
+    key = (message_id, lang)
+    if key in _SERVED_REACTIONS:
+        return True
+    _SERVED_REACTIONS[key] = True
+    while len(_SERVED_REACTIONS) > _SERVED_MAX:
+        _SERVED_REACTIONS.popitem(last=False)
+    return False
+
+
 @bot.event
 async def on_raw_reaction_add(payload):
     # Ignore the bot's own reactions
@@ -739,6 +794,10 @@ async def on_raw_reaction_add(payload):
     if not target_lang:
         return  # flag we don't have a language mapping for
 
+    # One reply per (message, language) — later identical reactions are ignored
+    if _already_served(payload.message_id, target_lang):
+        return
+
     channel = bot.get_channel(payload.channel_id)
     if channel is None:
         try:
@@ -749,6 +808,10 @@ async def on_raw_reaction_add(payload):
     try:
         message = await channel.fetch_message(payload.message_id)
     except (discord.NotFound, discord.Forbidden):
+        return
+
+    # Don't translate bot messages (including our own translation replies)
+    if message.author.bot:
         return
 
     if not message.content or not message.content.strip():
@@ -862,26 +925,31 @@ async def detect_language_menu(interaction: discord.Interaction, message: discor
 # Your server ID — guild-scoped sync makes commands appear instantly.
 GUILD_ID = 700382994946588814
 
+_commands_synced = False  # on_ready can fire again on reconnects; sync once
+
 @bot.event
 async def on_ready():
-    try:
-        guild = discord.Object(id=GUILD_ID)
+    global _commands_synced
+    if not _commands_synced:
+        try:
+            guild = discord.Object(id=GUILD_ID)
 
-        # 1. Copy code-defined commands onto the guild scope FIRST, while they're
-        #    still present in the in-memory tree.
-        bot.tree.copy_global_to(guild=guild)
+            # 1. Copy code-defined commands onto the guild scope FIRST, while
+            #    they're still present in the in-memory tree.
+            bot.tree.copy_global_to(guild=guild)
 
-        # 2. Remove the GLOBAL registrations on Discord's side (stale duplicates
-        #    from earlier deploys). Clearing only the global scope does NOT affect
-        #    the guild copies we just made above.
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()  # pushes empty global set -> deletes global dupes
+            # 2. Remove the GLOBAL registrations on Discord's side (stale
+            #    duplicates from earlier deploys). Clearing only the global
+            #    scope does NOT affect the guild copies made above.
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()  # pushes empty global set -> deletes dupes
 
-        # 3. Sync the guild scope (instant). These are the commands users see.
-        synced = await bot.tree.sync(guild=guild)
-        print(f"Synced {len(synced)} command(s) to guild {GUILD_ID}.")
-    except Exception as e:
-        print(f"[warn] Command sync failed: {e}")
+            # 3. Sync the guild scope (instant). These are what users see.
+            synced = await bot.tree.sync(guild=guild)
+            print(f"Synced {len(synced)} command(s) to guild {GUILD_ID}.")
+            _commands_synced = True
+        except Exception as e:
+            print(f"[warn] Command sync failed: {e}")
     print(f"Logged in as {bot.user}.")
 
 
