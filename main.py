@@ -15,6 +15,13 @@ from deep_translator.exceptions import (
     RequestError,
     TooManyRequests,
 )
+from collections import OrderedDict
+try:
+    from langdetect import detect_langs, DetectorFactory, LangDetectException
+    DetectorFactory.seed = 0  # deterministic results across runs
+    _LANGDETECT_OK = True
+except Exception:
+    _LANGDETECT_OK = False
 
 TOKEN = os.getenv("TOKEN")
 
@@ -247,10 +254,60 @@ def strip_slang(text: str) -> str:
     kept = [w for w in cleaned.split() if w not in SLANG_TERMS]
     return " ".join(kept).strip()
 
+# --- TRANSLATION CACHE + LOCAL DETECTION ---
+
+# Bounded LRU cache: (core_text_lower, target) -> (translated, src)
+# Avoids re-calling the API for repeated phrases; also cuts rate-limit risk.
+_TRANSLATION_CACHE = OrderedDict()
+_CACHE_MAX = 500
+
+def _cache_get(key):
+    if key in _TRANSLATION_CACHE:
+        _TRANSLATION_CACHE.move_to_end(key)  # mark as recently used
+        return _TRANSLATION_CACHE[key]
+    return None
+
+def _cache_put(key, value):
+    _TRANSLATION_CACHE[key] = value
+    _TRANSLATION_CACHE.move_to_end(key)
+    while len(_TRANSLATION_CACHE) > _CACHE_MAX:
+        _TRANSLATION_CACHE.popitem(last=False)  # evict oldest
+
+# Confidence needed to TRUST a local "already in target language" skip.
+# High on purpose: langdetect is unreliable on short/slangy text, so we only
+# ever let it SKIP work, never let it change an actual translation.
+_DETECT_SKIP_CONFIDENCE = 0.90
+
+def local_detect(text: str):
+    """
+    Best-effort local language detection. Returns (code, confidence) or (None, 0).
+    Used only to skip needless API calls — never to override a real translation.
+    """
+    if not _LANGDETECT_OK:
+        return None, 0.0
+    try:
+        langs = detect_langs(text)
+    except LangDetectException:
+        return None, 0.0
+    except Exception:
+        return None, 0.0
+    if not langs:
+        return None, 0.0
+    top = langs[0]
+    return top.lang, top.prob
+
+
 def translate_text(text: str, target: str = "en"):
     """
     Translate text into `target` language code.
     Returns (translated_text, detected_source) or (None, reason_string).
+
+    Order of cheap checks before hitting the API:
+      1. strip decorations, length gate
+      2. slang-only skip
+      3. local detection: if confidently ALREADY the target language, skip
+      4. cache lookup
+      5. API call (only on a genuine miss), then cache the result
     """
     core = _strippable(text)
     if len(core) < TRANSLATE_MIN_LEN:
@@ -260,6 +317,22 @@ def translate_text(text: str, target: str = "en"):
     if len(strip_slang(core)) < TRANSLATE_MIN_LEN:
         return None, "slang_only"
 
+    # Local detection: skip if we're confident it's ALREADY the target language.
+    # (Only a skip optimization — we never trust this to relabel a translation.)
+    code, conf = local_detect(core)
+    if code and conf >= _DETECT_SKIP_CONFIDENCE:
+        base_target = target.split("-")[0].lower()   # "zh-CN" -> "zh"
+        base_code = code.split("-")[0].lower()
+        if base_code == base_target:
+            return None, "already_target"
+
+    # Cache lookup (normalized key)
+    key = (core.lower(), target)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached  # (translated, src) tuple, zero API cost
+
+    # Genuine miss -> call the API
     try:
         translator = GoogleTranslator(source="auto", target=target)
         translated = translator.translate(core)
@@ -277,11 +350,13 @@ def translate_text(text: str, target: str = "en"):
 
     src = getattr(translator, "source", "auto")
 
-    # If result equals input AND we were targeting English, it was already English
+    # If result equals input AND we targeted English, it was already English
     if target == "en" and translated.strip().lower() == core.strip().lower():
         return None, "already_target"
 
-    return translated, src
+    result = (translated, src)
+    _cache_put(key, result)
+    return result
 
 def make_translation_embed(translated: str, src: str, target: str, requester: str = None) -> discord.Embed:
     src_label = src.upper() if src and src != "auto" else "Auto-detected"
